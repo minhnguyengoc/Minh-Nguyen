@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-primary: #6366f1;
+  --color-brand-secondary: #ec4899;
+  --color-background: #0f172a;
+  --color-card: rgba(255, 255, 255, 0.05);
+  --color-border: rgba(255, 255, 255, 0.15);
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+body {
+  background-color: var(--color-background);
+  color: #ffffff;
+  font-family: var(--font-sans);
+  margin: 0;
+  overflow: hidden;
+}
+
+.mesh-bg {
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(circle at 0% 0%, #4f46e5 0%, transparent 50%),
+              radial-gradient(circle at 100% 0%, #7c3aed 0%, transparent 50%),
+              radial-gradient(circle at 100% 100%, #db2777 0%, transparent 50%),
+              radial-gradient(circle at 0% 100%, #2563eb 0%, transparent 50%);
+  filter: blur(80px);
+  opacity: 0.4;
+  z-index: -1;
+}
+
+.glass {
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+}
+
+.glass-card {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.chart-gradient-top {
+  stop-color: var(--color-brand-primary);
+  stop-opacity: 0.3;
+}
+
+.chart-gradient-bottom {
+  stop-color: var(--color-brand-primary);
+  stop-opacity: 0;
+}

@@ -1,0 +1,67 @@
+{
+  "manifest_version": "4.1.0-institutional-production",
+  "created_timestamp": "2026-05-10T14:10:40Z",
+  "architecture_hash": "b4f9c5d1-6e82-4f9a-bb3c-d8f0e2a3b4c5",
+  "deterministic_seed": 42,
+  "feature_vector_length": 20,
+  "architecture": "EventDriven-RL-v2-Hardened",
+  "observation_schema": {
+    "dim": 20,
+    "feature_order": [
+      "price_normalized", "vol_normalized", "spread_normalized", "imbalance",
+      "rsi", "macd", "bollinger_width", "vwap_dist",
+      "position_norm", "unrealized_pnl_norm", "available_margin_norm",
+      "queue_priority_norm", "toxicity_score", "regime_one_hot_1", "regime_one_hot_2",
+      "time_of_day_cos", "time_of_day_sin", "day_of_week_cos", "day_of_week_sin", "latency_jitter"
+    ],
+    "normalization": "FrozenQuantile",
+    "scaler_hash": "7a8b9c0d1e2f3g4h5i6j7k8l9m0n1o2p",
+    "squashing": "Tanh",
+    "range": [-1.0, 1.0]
+  },
+  "action_schema": {
+    "type": "Discrete",
+    "size": 4,
+    "mapping": {
+      "0": "HOLD",
+      "1": "LONG",
+      "2": "SHORT",
+      "3": "CLOSE"
+    }
+  },
+  "ppa_hyperparameters": {
+    "learning_rate": 2.5e-4,
+    "n_steps": 2048,
+    "batch_size": 64,
+    "n_epochs": 10,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "ent_coef": 0.01,
+    "vf_coef": 0.5,
+    "max_grad_norm": 0.5,
+    "kl_early_stopping": 0.02
+  },
+  "reward_decomposition": {
+    "weights": {
+      "drawdown_penalty": 5.0,
+      "transaction_cost_pct": 0.0003,
+      "turnover_penalty": 0.1,
+      "overnight_penalty": 0.5
+    }
+  },
+  "execution_simulator": {
+    "parameters": {
+      "slip_beta": 0.5,
+      "queue_adverse_selection_bias": 1.2,
+      "temp_impact_beta": 0.1,
+      "perm_impact_gamma": 0.01
+    }
+  },
+  "regime_detector": {
+    "window": 40,
+    "ema_threshold_bps": 20,
+    "panic_zscore": 2.5,
+    "liquidity_crunch_threshold": 0.3
+  }
+}
