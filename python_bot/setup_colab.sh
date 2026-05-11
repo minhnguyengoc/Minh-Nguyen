@@ -14,9 +14,14 @@ echo "📍 Working Directory: $PWD"
 # 1. Sync from GitHub if in a git repo
 if [ -d ".git" ]; then
     echo "🔄 Syncing with remote repository..."
+    git config --global user.email "minhnnb2003@gmail.com"
+    git config --global user.name "Minh Nguyen"
     git fetch origin main
     git reset --hard origin/main
 fi
+
+# 2. Ensure data directories exist
+mkdir -p python_bot/data
 
 # 3. Clean stale artifacts and legacy gym
 echo "🧹 Cleaning environment..."

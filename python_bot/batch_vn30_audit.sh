@@ -28,8 +28,9 @@ do
     python3 python_bot/trainer.py --ticker "$TICKER" --steps "$STEPS" > "$LOG_DIR/${TICKER}_train.log" 2>&1
     
     # Check if training succeeded (model file exists)
-    # Bash 4.0+ suffix ,, for lowercase
-    MODEL_PATH="checkpoints/ppo_${TICKER,,}_intraday.zip"
+    # Use tr for lowercase to support broader bash versions (e.g., in some Colab instances)
+    TICKER_LOWER=$(echo "$TICKER" | tr '[:upper:]' '[:lower:]')
+    MODEL_PATH="checkpoints/ppo_${TICKER_LOWER}_intraday.zip"
     
     if [ -f "$MODEL_PATH" ]; then
         echo "   [2/2] Running Institutional Validation..."

@@ -2,6 +2,16 @@
 
 To ensure high-fidelity institutional results and environment stability, follow these guidelines:
 
+## 0. Fresh Installation (If files are lost or Git is corrupt)
+If you see errors like `No such file or directory` or `fatal: loose object is corrupt`, run this in a code cell to perform a clean re-clone:
+```bash
+%cd /content
+!rm -rf Minh-Nguyen
+!git clone https://github.com/minhnguyengoc/Minh-Nguyen.git
+%cd Minh-Nguyen
+!bash python_bot/setup_colab.sh
+```
+
 ## 1. Environment Synchronization
 Always run this script at the start of your session to pull the latest architectural updates and fix pathing:
 ```bash
