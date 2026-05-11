@@ -15,7 +15,7 @@ import { cn, formatVND, formatPercent } from './lib/utils';
 import { TickerData, PortfolioStats, Position, Trade, Signal } from './types';
 
 // --- INITIALIZE AI ---
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+// Gemini logic moved to server for better security and stability
 
 // --- MOCK CHART DATA ---
 const chartData = [
@@ -38,6 +38,7 @@ export default function App() {
   const [loadingSignal, setLoadingSignal] = useState<string | null>(null);
   const [activeSignal, setActiveSignal] = useState<Signal | null>(null);
   const [feedbackTrade, setFeedbackTrade] = useState<Trade | null>(null);
+  const [isConnected, setIsConnected] = useState(true);
 
   useEffect(() => {
     fetchData();
@@ -49,17 +50,14 @@ export default function App() {
     try {
       const tickerRes = await fetch('/api/market/tickers');
       if (!tickerRes.ok) {
-        const errorText = await tickerRes.text();
-        console.error(`Ticker fetch failed [${tickerRes.status}]:`, errorText);
         throw new Error(`Ticker fetch failed: ${tickerRes.status}`);
       }
       const tickerData = await tickerRes.json();
       setTickers(tickerData);
+      setIsConnected(true);
 
       const portfolioRes = await fetch('/api/portfolio');
       if (!portfolioRes.ok) {
-        const errorText = await portfolioRes.text();
-        console.error(`Portfolio fetch failed [${portfolioRes.status}]:`, errorText);
         throw new Error(`Portfolio fetch failed: ${portfolioRes.status}`);
       }
       const pData = await portfolioRes.json();
@@ -76,14 +74,17 @@ export default function App() {
 
       const lessonsRes = await fetch('/api/learning/lessons');
       if (!lessonsRes.ok) {
-        const errorText = await lessonsRes.text();
-        console.error(`Lessons fetch failed [${lessonsRes.status}]:`, errorText);
         throw new Error(`Lessons fetch failed: ${lessonsRes.status}`);
       }
       const lData = await lessonsRes.json();
       setLessons(lData);
-    } catch (err) {
-      console.error('Data sync error:', err);
+    } catch (err: any) {
+      setIsConnected(false);
+      if (err.name === 'TypeError' && err.message === 'Failed to fetch') {
+        console.error('Network Error: Check if dev server is running or if requests are being blocked.');
+      } else {
+        console.error('Data sync error:', err.message);
+      }
     }
   };
 
@@ -124,30 +125,16 @@ export default function App() {
 
   const getAISignal = async (symbol: string) => {
     setLoadingSignal(symbol);
-    const ticker = tickers.find(t => t.symbol === symbol);
-    if (!ticker) return;
-
     try {
-      const lessonSummary = lessons.length > 0 
-        ? `PAST PERFORMANCE LESSONS (Learn from these entries/exits):\n${lessons.map(l => `- Ticker: ${l.symbol}, Outcome: ${l.outcome}, PnL: ${l.pnl}, Reason: ${l.reason}`).join('\n')}`
-        : "No previous learning data available. Use standard quantitative strategies.";
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `Act as a senior quantitative trader for the Vietnam stock market. 
-        
-        Analyze the current data for ${symbol}: Price ${ticker.price}, Change ${ticker.changePercent}%, Volume ${ticker.volume}.
-        Based on technical momentum and market sentiment for ${symbol} in HOSE, provide a BUY, SELL, or HOLD recommendation.
-        
-        ${lessonSummary}
-        
-        Format the response as JSON: { "action": "BUY"|"SELL"|"HOLD", "confidence": 0-1, "reason": "concise explanation" }`,
-        config: {
-          responseMimeType: "application/json"
-        }
+      const response = await fetch('/api/ai/signal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, tickers, lessons }),
       });
       
-      const signal = JSON.parse(response.text || "{}");
+      if (!response.ok) throw new Error("AI Signal fetch failed");
+      
+      const signal = await response.json();
       setActiveSignal({ ...signal, symbol, timestamp: new Date().toISOString() });
     } catch (err) {
       console.error('Signal failed', err);
@@ -177,6 +164,12 @@ export default function App() {
         </ul>
 
         <div className="mt-auto hidden lg:block">
+          {!isConnected && (
+            <div className="mb-4 p-3 bg-red-500/20 border border-red-500/30 rounded-xl">
+              <p className="text-[10px] text-red-400 font-bold uppercase tracking-tight">Backend Disconnected</p>
+              <p className="text-[9px] text-red-300/60 leading-tight">Check server logs or restart the dev server.</p>
+            </div>
+          )}
           <div className="p-4 glass rounded-2xl">
             <div className="flex items-center gap-2 mb-2">
               <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />

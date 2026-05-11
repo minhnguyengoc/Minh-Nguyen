@@ -3,6 +3,7 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
@@ -43,6 +44,50 @@ async function startServer() {
   // === API ROUTES ===
   app.get("/api/learning/lessons", (req, res) => {
     res.json(learningLessons);
+  });
+
+  // Gemini Integration (Server-side to protect API Key)
+  app.post("/api/ai/signal", async (req, res) => {
+    const { symbol, tickers, lessons } = req.body;
+    const ticker = tickers.find((t: any) => t.symbol === symbol);
+    
+    if (!ticker) return res.status(404).json({ error: "Ticker not found" });
+
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("GEMINI_API_KEY not configured on server");
+      }
+
+      const genAI = new GoogleGenAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
+      const lessonSummary = lessons.length > 0 
+        ? `PAST PERFORMANCE LESSONS:\n${lessons.map((l: any) => `- Ticker: ${l.symbol}, Outcome: ${l.outcome}, PnL: ${l.pnl}, Reason: ${l.reason}`).join('\n')}`
+        : "No previous learning data available.";
+
+      const prompt = `Act as a senior quantitative trader for the Vietnam stock market. 
+      Analyze the current data for ${symbol}: Price ${ticker.price}, Change ${ticker.changePercent}%, Volume ${ticker.volume}.
+      Based on technical momentum and market sentiment for ${symbol} in HOSE, provide a BUY, SELL, or HOLD recommendation.
+      
+      ${lessonSummary}
+      
+      Format the response as JSON: { "action": "BUY"|"SELL"|"HOLD", "confidence": 0-1, "reason": "concise explanation" }`;
+
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
+      
+      // Attempt to find JSON in the response if it's wrapped in triple backticks
+      const jsonStart = text.indexOf('{');
+      const jsonEnd = text.lastIndexOf('}') + 1;
+      const jsonStr = text.substring(jsonStart, jsonEnd);
+      
+      res.json(JSON.parse(jsonStr || "{}"));
+    } catch (err: any) {
+      console.error("[AI Signal Error]:", err.message);
+      res.status(500).json({ error: "AI Signal Generation Failed", details: err.message });
+    }
   });
 
   app.get("/api/market/tickers", (req, res) => {
