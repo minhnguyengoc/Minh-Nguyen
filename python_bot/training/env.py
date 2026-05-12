@@ -141,6 +141,6 @@ class VNStockInstitutionalEnv(gym.Env):
             "pnl": portfolio.realized_pnl_today + portfolio.unrealized_pnl,
             "position": portfolio.position_quantity,
             "ood_score": ood_score,
-            "is_exploiting": self.exploit_detector.audit()["is_exploiting"]
+            "is_exploiting": self.exploit_detector.audit().get("is_exploiting", False)
         }
         return info

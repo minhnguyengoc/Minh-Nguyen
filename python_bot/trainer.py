@@ -218,7 +218,7 @@ def run_training_pipeline(
             json.dump(_make_serializable(metrics), f, indent=2)
 
         # Auto-plot after training finishes
-        from plot_training import TrainingVisualizer
+        from python_bot.plot_training import TrainingVisualizer
         viz = TrainingVisualizer(log_dir=log_dir)
         viz.load_and_plot()
         logging.info("📊 Dashboard auto-generated.")
