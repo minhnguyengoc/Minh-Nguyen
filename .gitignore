@@ -6,3 +6,16 @@ coverage/
 *.log
 .env*
 !.env.example
+
+
+# Runtime artifacts
+checkpoints/
+historical_data/
+logs/
+*.zip
+*.csv
+*.pkl
+*.pt
+*.pth
+*.onnx
+tensorboard/
