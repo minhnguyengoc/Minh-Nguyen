@@ -7,15 +7,21 @@ coverage/
 .env*
 !.env.example
 
-
-# Runtime artifacts
-checkpoints/
+# Institutional Trading Bot Artifacts
 historical_data/
+checkpoints/
 logs/
+reports/
+agents/saved_models/
 *.zip
 *.csv
+*.parquet
 *.pkl
 *.pt
 *.pth
 *.onnx
-tensorboard/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class

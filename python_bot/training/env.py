@@ -48,7 +48,8 @@ class VNStockInstitutionalEnv(gym.Env):
         
         # Spaces
         self.observation_space = gym.spaces.Box(low=-4.0, high=4.0, shape=(20,), dtype=np.float32)
-        self.action_space = gym.spaces.Discrete(4)
+        # Action Space: 0 = HOLD, 1 = BUY, 2 = SELL/CLOSE
+        self.action_space = gym.spaces.Discrete(3)
         
         self.current_idx = 0
 
@@ -72,14 +73,19 @@ class VNStockInstitutionalEnv(gym.Env):
         
         self.guard.reset_worker()
         
-        return obs.vector, self._get_info(obs.metadata)
+        return obs.vector, self._get_info(obs.metadata, action=0, position_before=0)
 
     def step(self, action_idx: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        data_before = self.history[self.current_idx]
+        pos_before = self.ledger.get_state(data_before.close).position_quantity
+        
         self.current_idx += 1
         terminated = self.current_idx >= len(self.history) - 1
         
         data = self.history[self.current_idx]
-        action = ActionDirective(action_idx)
+        # Map action: 0=HOLD, 1=LONG, 2=CLOSE (matches 0,1,2 used in VNStockTradingEnv mostly)
+        action_map = {0: ActionDirective.HOLD, 1: ActionDirective.LONG, 2: ActionDirective.CLOSE}
+        action = action_map.get(action_idx, ActionDirective.HOLD)
         
         # 1. PROCESS FILLS (Causal Confirmation)
         fills = self.execution.step(data)
@@ -99,21 +105,30 @@ class VNStockInstitutionalEnv(gym.Env):
         session = obs.metadata.session_state
         is_auction = session in [SessionState.ATO, SessionState.ATC]
         
+        rejected_reason = None
         # Standard Action Logic (Ignored during Auctions to prevent reward hacking)
         if not is_auction:
             if action == ActionDirective.LONG:
-                qty = 100
-                req = OrderRequest(symbol=data.symbol, side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=qty, timestamp=data.timestamp)
-                self.execution.submit(req, data)
-            elif action == ActionDirective.SHORT:
-                qty = 100
-                req = OrderRequest(symbol=data.symbol, side=OrderSide.SELL, order_type=OrderType.MARKET, quantity=qty, timestamp=data.timestamp)
-                self.execution.submit(req, data)
-            elif action == ActionDirective.CLOSE:
-                if portfolio.position_quantity != 0:
-                    side = OrderSide.SELL if portfolio.position_quantity > 0 else OrderSide.BUY
-                    req = OrderRequest(symbol=data.symbol, side=side, order_type=OrderType.MARKET, quantity=abs(portfolio.position_quantity), timestamp=data.timestamp)
+                # Check cash for buy
+                fee_est = (100 * data.close) * 0.0015
+                if portfolio.available_cash < (100 * data.close + fee_est):
+                    rejected_reason = "INSUFFICIENT_CASH"
+                else:
+                    qty = 100
+                    req = OrderRequest(symbol=data.symbol, side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=qty, timestamp=data.timestamp)
                     self.execution.submit(req, data)
+            elif action == ActionDirective.CLOSE:
+                if portfolio.position_quantity == 0:
+                    rejected_reason = "NO_POSITION_TO_CLOSE"
+                elif portfolio.locked_shares_t2 > 0 and (portfolio.position_quantity - portfolio.locked_shares_t2) <= 0:
+                    rejected_reason = "T+2_LOCKHOLD"
+                else:
+                    side = OrderSide.SELL if portfolio.position_quantity > 0 else OrderSide.BUY
+                    # In HOSE we only have Long, so position_quantity > 0 always
+                    qty_to_sell = portfolio.position_quantity - portfolio.locked_shares_t2
+                    if qty_to_sell > 0:
+                        req = OrderRequest(symbol=data.symbol, side=side, order_type=OrderType.MARKET, quantity=qty_to_sell, timestamp=data.timestamp)
+                        self.execution.submit(req, data)
 
         # Force Liquidation still allowed in ATC for emergency exit
         liquidation_orders = self.liquidator.get_liquidation_orders("TRAIN_SYMBOL", portfolio, data, self.current_idx)
@@ -125,22 +140,42 @@ class VNStockInstitutionalEnv(gym.Env):
         reward = 0.0
         components = {}
         if not is_auction:
-            reward, components = self.reward_engine.calculate(portfolio, data, action, fills)
+            # Pass full history and current idx for future return access if needed
+            reward, components = self.reward_engine.calculate(
+                portfolio, data, action, fills, 
+                history=self.history, current_idx=self.current_idx
+            )
             
         self.exploit_detector.record_step(action_idx, reward, components)
         
         # 6. DISTRIBUTED FINGERPRINT
         self.guard.fingerprint_interaction(data.event_id, obs.vector, action_idx, reward)
 
-        return obs.vector, reward, terminated, False, self._get_info(obs.metadata, ood_score)
+        pos_after = portfolio.position_quantity
+        return obs.vector, reward, terminated, False, self._get_info(
+            obs.metadata, ood_score, action=action_idx, 
+            position_before=pos_before, position_after=pos_after,
+            rejected_reason=rejected_reason, reward_components=components
+        )
 
-    def _get_info(self, meta: Any, ood_score: float = 0.0) -> Dict[str, Any]:
+    def _get_info(self, meta: Any, ood_score: float = 0.0, **kwargs) -> Dict[str, Any]:
         portfolio = self.ledger.get_state(self.history[self.current_idx].close)
         info = {
-            "metadata": meta.model_dump(),
+            "metadata": meta.model_dump() if hasattr(meta, 'model_dump') else meta,
             "pnl": portfolio.realized_pnl_today + portfolio.unrealized_pnl,
             "position": portfolio.position_quantity,
             "ood_score": ood_score,
-            "is_exploiting": self.exploit_detector.audit().get("is_exploiting", False)
+            "is_exploiting": self.exploit_detector.audit()["is_exploiting"],
+            
+            # Stage 4.1 Diagnostics
+            "raw_action": kwargs.get("action"),
+            "interpreted_action": kwargs.get("action"), # Simplified mapping
+            "position_before": kwargs.get("position_before"),
+            "position_after": kwargs.get("position_after"),
+            "position_changed": kwargs.get("position_before") != kwargs.get("position_after"),
+            "total_trades": self.ledger.total_fills, # ExposureLedger likely has this or I use info summary
+            "reward_components": kwargs.get("reward_components", {}),
+            "rejected_reason": kwargs.get("rejected_reason")
         }
         return info
+

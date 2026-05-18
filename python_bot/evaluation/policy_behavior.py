@@ -34,11 +34,11 @@ class PolicyBehaviorAnalyzer:
         self._current_pos_start = -1
         self.logger = logging.getLogger("BehaviorAnalyzer")
 
-    def record_step(self, action: int, reward: float, components: Any, position: int, step: int):
+    def record_step(self, action: int, reward: float, components: Any, position: float, step: int):
         """Records a single step of interaction."""
         self._actions.append(int(action))
         self._rewards.append(float(reward))
-        self._last_pos = getattr(self, "_last_pos", 0)
+        self._last_pos = getattr(self, "_last_pos", 0.0)
         
         # Ensure components is a dict
         if isinstance(components, dict):
@@ -46,15 +46,15 @@ class PolicyBehaviorAnalyzer:
         else:
             self._reward_components.append({"reward": float(reward)})
         
-        # Track holding times accurately (handle neutral -> pos, pos -> neutral, and flip)
-        if position != self._last_pos:
-            if self._last_pos != 0:
+        # Track holding times accurately (position can be shares float)
+        if (position > 0) != (self._last_pos > 0):
+            if self._last_pos > 0:
                 # Close previous position timing
                 if self._current_pos_start >= 0:
                     self._holding_times.append(max(0, step - self._current_pos_start))
                     self._current_pos_start = -1
             
-            if position != 0:
+            if position > 0:
                 # Start new position timing
                 self._current_pos_start = step
         
@@ -78,7 +78,8 @@ class PolicyBehaviorAnalyzer:
             entropy = -np.sum(probs * np.log2(probs + 1e-8))
             
             # 2. Turnover (Avg trades per 1000 steps)
-            trades = sum(1 for a in self._actions if a in [1, 2, 3])
+            # Action 1: Buy, 2: Sell
+            trades = sum(1 for a in self._actions if a in [1, 2])
             turnover = trades / (max(len(self._actions), 1) / 1000)
             
             # 3. Holding Time Stats
@@ -94,9 +95,22 @@ class PolicyBehaviorAnalyzer:
             dominance = {k: v / (total_abs_r + 1e-8) for k, v in comp_sums.items()}
             
             flags = []
-            if turnover > 800: flags.append("HYPER_TURNOVER")
-            if 0 < avg_hold < 2: flags.append("MICRO_SCALPING_EXPLOIT")
-            if any(d > 0.9 for d in dominance.values()): flags.append("REWARD_SIGNAL_MONOPOLY")
+            if turnover > 500: flags.append("HYPER_TURNOVER")
+            if turnover < 1.0: flags.append("ZERO_TURNOVER")
+            if 0 < avg_hold < 5: flags.append("MICRO_SCALPING_EXPLOIT")
+            
+            # Check for Reward Hacking: High reward, low PnL/Edge ratio
+            # If 'pnl_realized' is low relative to 'directional_edge' but total reward is high
+            edge_contribution = dominance.get('directional_edge', 0)
+            pnl_contribution = dominance.get('pnl_realized', 0)
+            if edge_contribution > 0.8 and pnl_contribution < 0.1:
+                flags.append("POTENTIAL_REWARD_HACKING")
+
+            status = "HEALTHY"
+            if "HYPER_TURNOVER" in flags or "ZERO_TURNOVER" in flags:
+                status = "DANGEROUS"
+            elif flags:
+                status = "WARNING"
             
             return {
                 "entropy": float(entropy),
@@ -104,7 +118,7 @@ class PolicyBehaviorAnalyzer:
                 "avg_holding_bars": float(avg_hold),
                 "reward_dominance": dominance,
                 "anomaly_flags": flags,
-                "status": "DANGEROUS" if flags else "HEALTHY"
+                "status": status
             }
         except Exception as e:
             self.logger.error(f"Analysis failed: {e}")

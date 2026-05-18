@@ -59,14 +59,12 @@ async function startServer() {
         throw new Error("GEMINI_API_KEY not configured on server");
       }
 
-      const genAI = new GoogleGenAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-
+      const ai = new GoogleGenAI({ apiKey });
       const lessonSummary = lessons.length > 0 
         ? `PAST PERFORMANCE LESSONS:\n${lessons.map((l: any) => `- Ticker: ${l.symbol}, Outcome: ${l.outcome}, PnL: ${l.pnl}, Reason: ${l.reason}`).join('\n')}`
         : "No previous learning data available.";
 
-      const prompt = `Act as a senior quantitative trader for the Vietnam stock market. 
+      const promptStr = `Act as a senior quantitative trader for the Vietnam stock market. 
       Analyze the current data for ${symbol}: Price ${ticker.price}, Change ${ticker.changePercent}%, Volume ${ticker.volume}.
       Based on technical momentum and market sentiment for ${symbol} in HOSE, provide a BUY, SELL, or HOLD recommendation.
       
@@ -74,9 +72,12 @@ async function startServer() {
       
       Format the response as JSON: { "action": "BUY"|"SELL"|"HOLD", "confidence": 0-1, "reason": "concise explanation" }`;
 
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      const text = response.text();
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: promptStr,
+      });
+      
+      const text = response.text || "";
       
       // Attempt to find JSON in the response if it's wrapped in triple backticks
       const jsonStart = text.indexOf('{');

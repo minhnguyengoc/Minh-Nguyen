@@ -9,8 +9,10 @@ import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
+from python_bot.training.ppo_config import PPO_CONFIG, STABILIZER_CONFIG
 
 # Configure institutional logging
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -53,39 +55,41 @@ class PPOAgent:
         os.makedirs(model_dir, exist_ok=True)
 
         # 3. Space Validation & Vectorization
-        if not isinstance(env.action_space, gym.spaces.Discrete) or env.action_space.n != 4:
-            raise ValueError("Environment must have Discrete(4) action space (HOLD, LONG, SHORT, CLOSE).")
+        if not isinstance(env.action_space, gym.spaces.Discrete) or env.action_space.n != 3:
+            raise ValueError("Environment must have Discrete(3) action space (HOLD, BUY, SELL).")
         
         self.raw_env = env  # Keep reference for custom evaluation
         self.env = DummyVecEnv([lambda: env])
         
-        # 4. Custom MLP Architecture (Deeper pi/vf heads for complex feature extraction)
+        # 4. Custom MLP Architecture (Deeper pi/vf heads)
         policy_kwargs = dict(
-            net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),
+            net_arch=dict(pi=[512, 512, 256, 128], vf=[512, 512, 256, 128]),
             activation_fn=torch.nn.Tanh
         )
 
-        # 5. Model Initialization (Tuned for noisy 1m intraday data)
+        # 5. Model Initialization (Institutional Stage 4 Defaults)
+        # We now use the centralized configurations from ppo_config.py
         self.model = PPO(
-            policy="MlpPolicy",
+            policy=PPO_CONFIG.get("policy", "MlpPolicy"),
             env=self.env,
-            learning_rate=1.5e-4,     # Reduced for higher stability in noisy financial series
+            learning_rate=PPO_CONFIG.get("learning_rate", 1e-4),
             n_steps=n_steps,          
             batch_size=batch_size,    
-            n_epochs=10,
-            gamma=0.99,               
-            gae_lambda=0.95,
-            clip_range=0.2,           
-            ent_coef=0.01,            # Increased exploration pressure
-            vf_coef=0.5,
-            max_grad_norm=0.5,
-            target_kl=0.015,          # Safety brake for policy updates
+            n_epochs=PPO_CONFIG.get("n_epochs", 10),
+            gamma=PPO_CONFIG.get("gamma", 0.99),               
+            gae_lambda=PPO_CONFIG.get("gae_lambda", 0.95),
+            clip_range=PPO_CONFIG.get("clip_range", 0.15),
+            ent_coef=PPO_CONFIG.get("ent_coef", 0.03),
+            vf_coef=PPO_CONFIG.get("vf_coef", 0.5),
+            max_grad_norm=PPO_CONFIG.get("max_grad_norm", 0.5),
+            target_kl=STABILIZER_CONFIG.get("kl_early_stopping", 0.03),
             policy_kwargs=policy_kwargs,
             verbose=1,
             seed=self.seed,
             device=device,
             tensorboard_log=tensorboard_log
         )
+
         
         logger.info(f"PPOAgent Initialized | Mode: {'PAPER' if paper_trading else 'SIM'} | Device: {self.model.device}")
 

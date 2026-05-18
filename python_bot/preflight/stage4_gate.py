@@ -1,4 +1,3 @@
-import numpy as np
 import logging
 from typing import List
 from python_bot.common.types import MarketData

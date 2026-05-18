@@ -283,17 +283,31 @@ class DataLoader:
         self._is_normalized = True
         return self
 
-    def get_full_matrix(self) -> Tuple[np.ndarray, np.ndarray, List[datetime], List[str], np.ndarray]:
-        """Returns (states, ohlcv, timestamps, features, session_dates) for Gym episode reset."""
+    def get_processed_df(self) -> pd.DataFrame:
+        """Returns the final processed and normalized DataFrame."""
         if not self._is_normalized:
-            raise RuntimeError("CRITICAL: Cannot export state matrix before normalization. Call .normalize() first.")
+            raise RuntimeError("CRITICAL: Cannot export before normalization. Call .normalize() first.")
+        return self.df.copy()
+
+def load_multi_ticker_data(tickers: List[str], base_dir: str = "historical_data") -> pd.DataFrame:
+    """Loads and combines data from multiple tickers, adding ticker_id embeddings."""
+    all_dfs = []
+    for i, ticker in enumerate(tickers):
+        try:
+            loader = DataLoader(ticker=ticker, base_dir=base_dir)
+            df = loader.fetch_or_load().build_features().normalize().get_processed_df()
+            df['ticker_id'] = i
+            df['ticker_name'] = ticker
+            all_dfs.append(df)
+            logging.info(f"Loaded and processed {ticker}")
+        except Exception as e:
+            logging.error(f"Failed to load {ticker}: {e}")
             
-        states = self.df[self.feature_columns].values.astype(np.float32)
-        ohlcv = self.df[['open', 'high', 'low', 'close', 'volume']].values.astype(np.float32)
-        timestamps = self.df['timestamp'].tolist()
-        # Convert dates to int (YYYYMMDD) for fast session boundary detection in Env
-        session_dates = (self.df['timestamp'].dt.strftime('%Y%m%d')).astype(int).values
-        return states, ohlcv, timestamps, self.feature_columns, session_dates
+    if not all_dfs:
+        raise ValueError("No tickers loaded successfully.")
+        
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    return combined_df
 
 if __name__ == "__main__":
     # Internal Validation Suite
