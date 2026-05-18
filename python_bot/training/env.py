@@ -165,7 +165,7 @@ class VNStockInstitutionalEnv(gym.Env):
             "pnl": portfolio.realized_pnl_today + portfolio.unrealized_pnl,
             "position": portfolio.position_quantity,
             "ood_score": ood_score,
-            "is_exploiting": self.exploit_detector.audit()["is_exploiting"],
+            "is_exploiting": self.exploit_detector.audit().get("is_exploiting", False),
             
             # Stage 4.1 Diagnostics
             "raw_action": kwargs.get("action"),
@@ -173,7 +173,7 @@ class VNStockInstitutionalEnv(gym.Env):
             "position_before": kwargs.get("position_before"),
             "position_after": kwargs.get("position_after"),
             "position_changed": kwargs.get("position_before") != kwargs.get("position_after"),
-            "total_trades": self.ledger.total_fills, # ExposureLedger likely has this or I use info summary
+            "total_trades": getattr(self.ledger, "total_fills", getattr(self, "total_trades", 0)),
             "reward_components": kwargs.get("reward_components", {}),
             "rejected_reason": kwargs.get("rejected_reason")
         }
