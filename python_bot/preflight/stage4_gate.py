@@ -1,5 +1,5 @@
-import numpy as np
 import logging
+import numpy as np
 from typing import List
 from python_bot.common.types import MarketData
 from python_bot.training.env import VNStockInstitutionalEnv

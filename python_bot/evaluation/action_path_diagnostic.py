@@ -59,14 +59,13 @@ class ActionPathDiagnostic:
 
         for episode in range(self.episodes):
             obs, _ = env.reset()
-            done = False
-            prev_shares = 0
-            
+            terminated = False
+            truncated = False
             while not (terminated or truncated):
                 self.stats["total_steps"] += 1
                 
                 # 1. Action decision
-                action = model.predict(obs, deterministic=True)
+                action, _ = model.predict(obs, deterministic=True)
                 action = int(action)
                 self.stats["raw_actions"][action] = self.stats["raw_actions"].get(action, 0) + 1
                 

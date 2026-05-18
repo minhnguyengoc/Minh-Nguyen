@@ -160,20 +160,21 @@ class VNStockInstitutionalEnv(gym.Env):
 
     def _get_info(self, meta: Any, ood_score: float = 0.0, **kwargs) -> Dict[str, Any]:
         portfolio = self.ledger.get_state(self.history[self.current_idx].close)
+        audit = self.exploit_detector.audit()
         info = {
             "metadata": meta.model_dump() if hasattr(meta, 'model_dump') else meta,
             "pnl": portfolio.realized_pnl_today + portfolio.unrealized_pnl,
             "position": portfolio.position_quantity,
             "ood_score": ood_score,
-            "is_exploiting": self.exploit_detector.audit().get("is_exploiting", False),
+            "is_exploiting": audit.get("is_exploiting", False),
             
             # Stage 4.1 Diagnostics
             "raw_action": kwargs.get("action"),
-            "interpreted_action": kwargs.get("action"), # Simplified mapping
+            "interpreted_action": kwargs.get("action"),
             "position_before": kwargs.get("position_before"),
             "position_after": kwargs.get("position_after"),
             "position_changed": kwargs.get("position_before") != kwargs.get("position_after"),
-            "total_trades": getattr(self.ledger, "total_fills", getattr(self, "total_trades", 0)),
+            "total_trades": getattr(self.ledger, "total_fills", 0),
             "reward_components": kwargs.get("reward_components", {}),
             "rejected_reason": kwargs.get("rejected_reason")
         }

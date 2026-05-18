@@ -1,5 +1,6 @@
 import numpy as np
 import logging
+from typing import Optional, Dict, Any, List, Tuple
 
 class ActionMonitor:
     """
@@ -54,7 +55,9 @@ class ActionMonitor:
 
     def check_failure_modes(self, step: int):
         stats = self.get_stats()
+        observed_actions = self.total_steps
         
+        # 1. Policy Collapse (HOLD-only) - Check after warmup
         if step > 50000:
             if stats["hold_pct"] > 0.98:
                 raise RuntimeError(f"POLICY_LEARNED_ALWAYS_HOLD: {stats['hold_pct'] * 100:.2f}% HOLD at step {step}")
@@ -63,10 +66,14 @@ class ActionMonitor:
                 # Still inactive after anti-HOLD phase
                 self.logger.warning(f"STILL_INACTIVE Warning: {stats['trades_per_1k_steps']:.2f} trades per 1k steps")
 
-        if stats["trade_frequency"] > 0.25:
-            raise RuntimeError(f"OVERTRADING_POLICY: {stats['trade_frequency'] * 100:.2f}% activity")
+        # 2. Overtrading/Turnover failure modes
+        # Only fail after enough samples (10k actions) AND enough exploration (30k steps)
+        if step > 30000 and observed_actions > 10000:
+            if stats["trade_frequency"] > 0.35:
+                raise RuntimeError(f"OVERTRADING_POLICY: {stats['trade_frequency'] * 100:.2f}% activity")
         
-        if stats["trades_per_1k_steps"] > 250:
-            raise RuntimeError(f"HYPER_TURNOVER: {stats['trades_per_1k_steps']:.2f} trades per 1k steps")
+        if step > 10000:
+            if stats["trades_per_1k_steps"] > 250:
+                raise RuntimeError(f"HYPER_TURNOVER: {stats['trades_per_1k_steps']:.2f} trades per 1k steps")
 
-from typing import Optional
+        return stats

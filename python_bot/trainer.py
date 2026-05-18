@@ -345,16 +345,101 @@ def run_training_pipeline(
 
 
 from python_bot.data_loader import DataLoader, load_multi_ticker_data
+from python_bot.features.feature_schema import get_numeric_feature_columns
+import argparse
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="PPO Institutional Trainer")
+    parser.add_argument("--symbol", type=str, default="FPT")
+    parser.add_argument("--tickers", type=str, default="FPT,MWG,HPG,SSI,VCB,MBB,STB")
+    parser.add_argument("--mode", type=str, default="PAPER")
+    parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument("--total-timesteps", type=int, default=50000)
+    parser.add_argument("--data-path", type=str, default="historical_data/FPT_1m.csv")
+    parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
+    parser.add_argument("--checkpoint-path", type=str, default=None)
+    parser.add_argument("--model-name", type=str, default="ppo_fpt_intraday")
+    parser.add_argument("--tensorboard-log", type=str, default="logs/tensorboard")
+    parser.add_argument("--log-dir", type=str, default="logs")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--eval-freq", type=int, default=10000)
+    parser.add_argument("--save-freq", type=int, default=10000)
+    parser.add_argument("--train-split", type=float, default=0.8)
+    parser.add_argument("--initial-cash", type=float, default=100000000)
+    parser.add_argument("--allow-hold-collapse", action="store_true")
+    return parser.parse_args()
+
+def ensure_trainer_args(args):
+    if args.checkpoint_path is None:
+        args.checkpoint_path = args.checkpoint_dir
+    return args
+
+def sanitize_training_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cleans the dataframe for RL training:
+    1. Encodes strings (ticker/symbol) as numeric IDs.
+    2. Drops non-numeric metadata.
+    3. Converts time into features.
+    4. Ensures all remaining values are float32 numbers.
+    """
+    logging.info(f"🧹 Sanitizing DataFrame | Shape: {df.shape}")
+    df_clean = df.copy()
+    
+    # 1. Encode symbol/ticker columns
+    for col in ['ticker', 'symbol', 'code']:
+        if col in df_clean.columns:
+            logging.info(f"  Encoding {col} to numeric IDs...")
+            df_clean[f'{col}_id'] = df_clean[col].astype('category').cat.codes
+            df_clean = df_clean.drop(columns=[col])
+            
+    # 2. Extract Time Features
+    time_col = None
+    for col in ['timestamp', 'datetime', 'date']:
+        if col in df_clean.columns:
+            time_col = col
+            break
+            
+    if time_col:
+        logging.info(f"  Converting {time_col} to numeric time features...")
+        ts = pd.to_datetime(df_clean[time_col])
+        df_clean['hour'] = ts.dt.hour
+        df_clean['minute'] = ts.dt.minute
+        df_clean['dayofweek'] = ts.dt.dayofweek
+        df_clean['hour_sin'] = np.sin(2 * np.pi * ts.dt.hour / 24.0)
+        df_clean['hour_cos'] = np.cos(2 * np.pi * ts.dt.hour / 24.0)
+        df_clean = df_clean.drop(columns=[time_col])
+
+    # 3. Drop known string metadata
+    metadata_cols = ['ticker_name', 'name', 'company_name', 'stock_code']
+    for col in metadata_cols:
+        if col in df_clean.columns:
+            df_clean = df_clean.drop(columns=[col])
+            
+    # 4. Filter for numeric only
+    numeric_df = df_clean.select_dtypes(include=[np.number])
+    dropped_cols = set(df_clean.columns) - set(numeric_df.columns)
+    if dropped_cols:
+        logging.info(f"  Dropped non-numeric columns: {dropped_cols}")
+        
+    # 5. Final Cleaning
+    numeric_df = numeric_df.replace([np.inf, -np.inf], 0).fillna(0)
+    numeric_df = numeric_df.astype(np.float32)
+    
+    logging.info(f"✨ Sanitization complete | New Shape: {numeric_df.shape}")
+    return numeric_df
 
 if __name__ == "__main__":
-    args = parse_args()
+    args = ensure_trainer_args(parse_args())
     total_steps = args.steps if args.steps is not None else args.total_timesteps
     
-    tickers = ["FPT", "MWG", "HPG", "SSI", "VCB", "MBB", "STB"]
+    tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
     logging.info(f"🚀 Loading Multi-Ticker Data: {tickers}")
     
     try:
         df = load_multi_ticker_data(tickers)
+        df = sanitize_training_dataframe(df)
+        
         run_training_pipeline(
             df=df,
             ticker="VN30_MULTI",
@@ -364,3 +449,5 @@ if __name__ == "__main__":
         )
     except Exception as e:
         logging.error(f"Fatal Pipeline Error: {e}")
+        import traceback
+        traceback.print_exc()

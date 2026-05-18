@@ -57,6 +57,10 @@ class ExposureLedger:
             realized_pnl_today=self._realized_pnl
         )
 
+    @property
+    def total_fills(self) -> int:
+        return len(self._execution_history)
+
 class ReconciliationEngine:
     """
     Verifies that internal ledger matches external broker state (ExecutionLedger).

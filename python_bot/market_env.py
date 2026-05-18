@@ -5,6 +5,7 @@ from collections import deque
 from typing import Tuple, Dict, Any, List, Optional
 import datetime as dt
 from python_bot.reward_engine import RewardEngine
+from python_bot.features.feature_schema import get_numeric_feature_columns
 
 class VNStockTradingEnv(gym.Env):
     """
@@ -27,8 +28,8 @@ class VNStockTradingEnv(gym.Env):
         # Action Space: 0: HOLD, 1: BUY 100% NAV, 2: SELL 100% Available
         self.action_space = gym.spaces.Discrete(3)
         
-        # Observation Space: Upgraded to match Feature Set (26) + Account Info (4) = 30
-        self.feature_columns = [c for c in self.df.columns if c not in ['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        # Observation Space: Dynamic based on numeric features + Account Info (4)
+        self.feature_columns = get_numeric_feature_columns(self.df)
         n_features = len(self.feature_columns) + 4
         
         self.observation_space = gym.spaces.Box(
@@ -94,8 +95,14 @@ class VNStockTradingEnv(gym.Env):
         # 1. Finite verification & clipping (Standard institutional guard)
         obs = np.nan_to_num(obs, nan=0.0, posinf=5.0, neginf=-5.0)
         obs = np.clip(obs, -5.0, 5.0)
+
+        # 2. Schema Validation
+        expected_dim = self.observation_space.shape[0]
+        if obs.shape[0] != expected_dim:
+            raise RuntimeError(f"OBSERVATION_DIM_MISMATCH: got {obs.shape[0]} expected {expected_dim}. "
+                               f"Numeric features: {len(self.feature_columns)}, Info: 4.")
         
-        return obs
+        return obs.astype(np.float32)
 
     def step(self, action: int):
         current_data = self.df.iloc[self.current_step]

@@ -40,85 +40,47 @@ class PolicyInferenceGateway:
         self._last_ts = None
 
     def process_tick(self, data: MarketData, portfolio: PortfolioState) -> Tuple[ActionDirective, StandardizedObservation]:
-        """
-        Process one market tick and ALWAYS return:
-        (ActionDirective, StandardizedObservation)
-
-        Critical runtime contract:
-        - Never return None.
-        - Duplicate ticks return HOLD + safe observation.
-        - Out-of-order buffer waiting returns HOLD + safe observation.
-        - Empty release returns HOLD + safe observation.
-        - Env reset/step must always be able to unpack this function.
-        """
+        # Out-of-Order Handling & Sequencing
+        self.latency_monitor.record(data.timestamp, data.received_at)
+        
         seq_id = self.sequencer.process(data)
         if seq_id is None:
-            return self._safe_hold_observation(data, reason="DEDUPED_OR_REJECTED")
-
-        self.latency_monitor.record(data.timestamp, data.received_at)
-
+            # Event sequence failed or duplicate
+            return self._get_safe_fallback(data, portfolio)
+            
         self.ooo_buffer.push(data)
         ticks = self.ooo_buffer.release(data.received_at)
-
+        
         if not ticks:
-            return self._safe_hold_observation(data, reason="OOO_BUFFER_WAITING")
-
+            # No ticks released from buffer yet
+            return self._get_safe_fallback(data, portfolio)
+            
         last_result = None
         for tick in ticks:
             last_result = self._handle_single_tick(tick, portfolio, seq_id)
-
-        if last_result is None:
-            return self._safe_hold_observation(data, reason="NO_TICK_RELEASED")
-
+            
         return last_result
 
-
-    def _safe_hold_observation(self, data: MarketData, reason: str = "SAFE_HOLD") -> Tuple[ActionDirective, StandardizedObservation]:
-        """
-        Deterministic HOLD fallback for warmup, dedupe, OOO buffering,
-        stale events, invalid events, and reset-time no-release paths.
-        """
-        import numpy as np
-
-        # Prefer actual feature engine dimension.
-        n_features = getattr(self.features, "n_features", None)
-        if n_features is None:
-            n_features = getattr(self.features, "feature_dim", None)
-        if n_features is None:
-            n_features = 26  # current PPO/env observation dimension fallback
-
-        vec = np.zeros(int(n_features), dtype=np.float32)
-
-        try:
-            session = self.session_fsm.update(data.timestamp)
-        except Exception:
-            session = None
-
-        try:
-            regime = self.regime_detector.update(data)
-        except Exception:
-            regime = None
-
-        try:
-            latency_ms = (data.received_at - data.timestamp).total_seconds() * 1000
-        except Exception:
-            latency_ms = 0.0
-
+    def _get_safe_fallback(self, data: MarketData, portfolio: PortfolioState) -> Tuple[ActionDirective, StandardizedObservation]:
+        """Returns a safe HOLD action and the last known or zero-filled observation."""
+        # Use existing features if possible, or zero if first tick
+        raw_vec = self.features.generate() if hasattr(self.features, 'generate') else np.zeros(20)
+        regime = MarketRegime.STABLE
+        norm_vec = self.normalizer.normalize(raw_vec, regime)
+        
         meta = ObservationMetadata(
-            is_session_active=False,
-            session_state=session,
+            is_session_active=True,
+            session_state=self.session_fsm.current_state,
             regime=regime,
             is_stale=True,
-            kill_switch=True,
+            kill_switch=False,
             drift_score=0.0,
             confidence_score=0.0,
             policy_abstain=True,
-            latency_ms=latency_ms,
+            latency_ms=0.0,
             event_sequence_id=-1
         )
-
-        obs = StandardizedObservation(vector=vec, metadata=meta)
-        return ActionDirective.HOLD, obs
+        return ActionDirective.HOLD, StandardizedObservation(vector=norm_vec, metadata=meta)
 
     def _handle_single_tick(self, data: MarketData, portfolio: PortfolioState, seq_id: int) -> Tuple[ActionDirective, StandardizedObservation]:
         # Update Clock & Session
