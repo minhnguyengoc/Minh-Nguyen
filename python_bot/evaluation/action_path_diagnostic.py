@@ -1,163 +1,160 @@
-import os
-import pandas as pd
+import sys
+from pathlib import Path
+from collections import Counter
+
 import numpy as np
-import torch
-import logging
-from typing import Dict, Any, List
 from stable_baselines3 import PPO
-from python_bot.market_env import VNStockTradingEnv
-from python_bot.ppo_agent import PPOAgent
-from python_bot.data_loader import DataLoader
 
-# Configure diagnostic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("ActionPathDiagnostic")
+ROOT = Path("/content/Minh-Nguyen")
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-class ActionPathDiagnostic:
-    """
-    Identifies why a policy might be failing to execute trades.
-    Audits the decision-to-execution pipeline.
-    """
-    def __init__(self, model_path: str, df: pd.DataFrame, episodes: int = 5):
-        self.model_path = model_path
-        self.df = df
-        self.episodes = episodes
-        
-        # Stats
-        self.stats = {
-            "total_steps": 0,
-            "raw_actions": {0: 0, 1: 0, 2: 0},
-            "hold_count": 0,
-            "buy_signal_count": 0,
-            "sell_signal_count": 0,
-            "risk_approved_count": 0,
-            "risk_rejected_count": 0,
-            "executed_trade_count": 0,
-            "fill_rejected_count": 0,
-            "position_change_count": 0
-        }
-        
-        self.rejection_log = []
 
-    def run(self):
-        logger.info(f"🚀 Starting Path Diagnostics for model: {self.model_path}")
-        
-        if not os.path.exists(self.model_path):
-            logger.error(f"❌ Checkpoint not found: {self.model_path}")
-            return "CASE_E_CHECKPOINT_NOT_FOUND"
+def normalize_action(action):
+    arr = np.asarray(action)
+    if arr.shape == ():
+        return int(arr.item())
+    return int(arr.flatten()[0])
 
-        # Load environment and agent
-        env = VNStockTradingEnv(df=self.df)
-        
-        # We need to load PPO directly to avoid mismatch if PPOAgent wrapper changes
-        try:
-            model = PPO.load(self.model_path, env=env)
-            logger.info("✅ Model loaded successfully.")
-        except Exception as e:
-            logger.error(f"❌ Failed to load model: {e}")
-            return "CASE_F_MODEL_LOAD_ERROR"
 
-        for episode in range(self.episodes):
-            obs, _ = env.reset()
-            terminated = False
-            truncated = False
-            while not (terminated or truncated):
-                self.stats["total_steps"] += 1
-                
-                # 1. Action decision
-                action, _ = model.predict(obs, deterministic=True)
-                action = int(action)
-                self.stats["raw_actions"][action] = self.stats["raw_actions"].get(action, 0) + 1
-                
-                if action == 0:
-                    self.stats["hold_count"] += 1
-                elif action == 1:
-                    self.stats["buy_signal_count"] += 1
-                elif action == 2:
-                    self.stats["sell_signal_count"] += 1
+def main():
+    from python_bot.trainer import load_multi_ticker_data, sanitize_training_dataframe
+    from python_bot.market_env import VNStockTradingEnv
 
-                # 2. Execute step
-                obs, reward, terminated, truncated, info = env.step(action)
-                
-                pos_changed = info.get("position_changed", False)
-                
-                # Check for rejections
-                if action in [1, 2]: 
-                    if not pos_changed:
-                        self.stats["risk_rejected_count"] += 1
-                    else:
-                        self.stats["risk_approved_count"] += 1
-                        self.stats["executed_trade_count"] += 1
-                        self.stats["position_change_count"] += 1
+    model_path = ROOT / "checkpoints/ppo_vn30_multi_stage4.zip"
 
-                
-        return self._summarize()
+    if not model_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {model_path}")
 
-    def _summarize(self):
-        print("\n" + "="*50)
-        print("🔍 POLICY ACTION PATH DIAGNOSTIC REPORT")
-        print("="*50)
-        total_steps = max(1, self.stats["total_steps"])
-        hold_pct = self.stats["hold_count"] / total_steps * 100
-        
-        for k, v in self.stats.items():
-            if k == "raw_actions":
-                print(f"raw_action_distribution....... {v}")
-            else:
-                print(f"{k:.<30} {v}")
-        
-        print(f"hold_pct...................... {hold_pct:.2f}%")
+    tickers = ["FPT", "MWG", "HPG", "SSI", "VCB", "MBB", "STB"]
 
-        # Diagnosis logic
-        res = "CASE_D_ENV_DOES_NOT_COUNT_TRADES_CORRECTLY"
-        
-        total_signals = self.stats["buy_signal_count"] + self.stats["sell_signal_count"]
-        if hold_pct > 98 and self.stats["executed_trade_count"] == 0:
-            res = "CASE_A_MODEL_ALWAYS_HOLD"
-        elif total_signals > 0 and self.stats["executed_trade_count"] == 0:
-            res = "CASE_B_ACTIONS_BLOCKED_BY_ENV_OR_RISK"
-        elif self.stats["executed_trade_count"] > 0:
-            res = "CASE_OK_POLICY_TRADES"
-            
-        print(f"\nFINAL DIAGNOSIS: {res}")
-        print("="*50)
-        return res
+    print(f"Loading model: {model_path}")
+    model = PPO.load(str(model_path))
+
+    print(f"Loading multi-symbol evaluation data: {tickers}")
+    df = load_multi_ticker_data(tickers)
+    df = sanitize_training_dataframe(df)
+
+    print(f"Sanitized evaluation dataframe shape: {df.shape}")
+
+    env = VNStockTradingEnv(df=df, initial_capital=100_000_000.0)
+
+    model_obs_dim = int(model.observation_space.shape[0])
+    env_obs_dim = int(env.observation_space.shape[0])
+
+    print(f"Model observation dim: {model_obs_dim}")
+    print(f"Env observation dim  : {env_obs_dim}")
+    print(f"Model action space   : {model.action_space}")
+    print(f"Env action space     : {env.action_space}")
+
+    if model_obs_dim != env_obs_dim:
+        raise RuntimeError(
+            f"OBSERVATION_SPACE_MISMATCH: model={model_obs_dim}, env={env_obs_dim}"
+        )
+
+    obs, info = env.reset()
+
+    raw_action_counts = Counter()
+    position_counts = Counter()
+    rejection_counts = Counter()
+    executed_position_changes = 0
+    trade_count_from_info = 0
+    reward_sum = 0.0
+    equity_last = None
+
+    prev_position = info.get("position", 0) if isinstance(info, dict) else 0
+
+    done = False
+    steps = 0
+    max_steps = min(5_000, len(df) - 2)
+
+    while not done and steps < max_steps:
+        action, _ = model.predict(obs, deterministic=True)
+        action_int = normalize_action(action)
+
+        raw_action_counts[action_int] += 1
+
+        result = env.step(action_int)
+
+        if len(result) == 5:
+            obs, reward, terminated, truncated, info = result
+            done = bool(terminated or truncated)
+        else:
+            obs, reward, done, info = result
+
+        reward_sum += float(reward)
+        steps += 1
+
+        if steps % 1000 == 0:
+            print(f"Diagnostic progress: {steps}/{max_steps}")
+
+        if isinstance(info, dict):
+            pos = info.get("position", info.get("position_after", prev_position))
+            position_counts[pos] += 1
+
+            if pos != prev_position:
+                executed_position_changes += 1
+
+            prev_position = pos
+            equity_last = info.get("equity", equity_last)
+            reason = info.get("rejected_reason", None)
+            if reason:
+                rejection_counts[str(reason)] += 1
+
+            trade_count_from_info = max(
+                trade_count_from_info,
+                int(info.get("total_trades", 0) or 0)
+            )
+
+    total_actions = sum(raw_action_counts.values())
+    hold_count = raw_action_counts.get(0, 0)
+    buy_count = raw_action_counts.get(1, 0)
+    sell_count = raw_action_counts.get(2, 0)
+
+    hold_pct = hold_count / max(total_actions, 1)
+    buy_pct = buy_count / max(total_actions, 1)
+    sell_pct = sell_count / max(total_actions, 1)
+
+    active_actions = total_actions - hold_count
+    raw_action_frequency = active_actions / max(total_actions, 1)
+    executed_trade_frequency = trade_count_from_info / max(steps, 1)
+
+    print("\n========== ACTION PATH DIAGNOSTIC ==========")
+    print(f"Steps evaluated              : {steps}")
+    print(f"Raw action distribution      : {dict(raw_action_counts)}")
+    print(f"HOLD count                   : {hold_count}")
+    print(f"BUY count                    : {buy_count}")
+    print(f"SELL/CLOSE count             : {sell_count}")
+    print(f"HOLD percentage              : {hold_pct:.2%}")
+    print(f"BUY percentage               : {buy_pct:.2%}")
+    print(f"SELL/CLOSE percentage        : {sell_pct:.2%}")
+    print(f"Raw action frequency         : {raw_action_frequency:.2%}")
+    print(f"Executed trade frequency     : {executed_trade_frequency:.2%}")
+    print(f"Position distribution        : {dict(position_counts)}")
+    print(f"Executed position changes    : {executed_position_changes}")
+    print(f"Trade count from env info    : {trade_count_from_info}")
+    print(f"Rejected reasons             : {dict(rejection_counts)}")
+    print(f"Total reward                 : {reward_sum:.6f}")
+    print(f"Ending equity                : {equity_last}")
+
+    if equity_last is not None and equity_last <= 0:
+        diagnosis = "CASE_E_NEGATIVE_EQUITY_OR_EXECUTION_TOO_AGGRESSIVE"
+    elif not np.isfinite(reward_sum):
+        diagnosis = "CASE_F_NAN_REWARD"
+    elif hold_pct > 0.98 and trade_count_from_info == 0:
+        diagnosis = "CASE_A_MODEL_ALWAYS_HOLD"
+    elif active_actions > 0 and trade_count_from_info == 0:
+        diagnosis = "CASE_B_ACTIONS_NOT_EXECUTED_OR_BLOCKED"
+    elif trade_count_from_info > 0 and raw_action_frequency > 0.35:
+        diagnosis = "CASE_C_RAW_ACTION_OVERTRADING"
+    elif trade_count_from_info > 0:
+        diagnosis = "CASE_OK_POLICY_TRADES"
+    else:
+        diagnosis = "CASE_UNKNOWN"
+
+    print(f"\nFINAL DIAGNOSIS              : {diagnosis}")
+    print("============================================\n")
 
 
 if __name__ == "__main__":
-    # 1. Load Data
-    logger.info("Loading evaluation data for FPT...")
-    loader = DataLoader(ticker="FPT")
-    # Fetch data and build features
-    # Note: Using build_features and normalize to match training observation space
-    df = loader.fetch_or_load().build_features().normalize().get_processed_df()
-    
-    # 2. Define Model Path
-    # User requested 'checkpoints/ppo_fpt_intraday.zip'
-    model_path = "checkpoints/ppo_fpt_intraday.zip"
-    
-    # Adjust path if needed
-    if not os.path.exists(model_path):
-        # Check alternative common locations
-        alt_paths = [
-            "agents/saved_models/ppo_fpt_intraday.zip",
-            "agents/saved_models/ppo_stock_v1.zip",
-            "agents/saved_models/ppo_vn30_multi_stage4.zip",
-            "agents/saved_models/latest.zip",
-            "agents/saved_models/best_sharpe.zip"
-        ]
-        for p in alt_paths:
-            if os.path.exists(p):
-                model_path = p
-                logger.info(f"Found alternative checkpoint at: {model_path}")
-                break
-
-    # 3. Run Diagnostic
-    diagnostic = ActionPathDiagnostic(model_path=model_path, df=df)
-    verdict = diagnostic.run()
-    
-    # Write to log file for persistency
-    os.makedirs("logs", exist_ok=True)
-    with open("logs/action_path_diagnostic.txt", "w") as f:
-        f.write(f"Verdict: {verdict}\n")
-        f.write(str(diagnostic.stats))
+    main()

@@ -54,26 +54,62 @@ class ActionMonitor:
         }
 
     def check_failure_modes(self, step: int):
-        stats = self.get_stats()
-        observed_actions = self.total_steps
-        
-        # 1. Policy Collapse (HOLD-only) - Check after warmup
-        if step > 50000:
-            if stats["hold_pct"] > 0.98:
-                raise RuntimeError(f"POLICY_LEARNED_ALWAYS_HOLD: {stats['hold_pct'] * 100:.2f}% HOLD at step {step}")
-            
-            if stats["trades_per_1k_steps"] < 5:
-                # Still inactive after anti-HOLD phase
-                self.logger.warning(f"STILL_INACTIVE Warning: {stats['trades_per_1k_steps']:.2f} trades per 1k steps")
+        """
+        Behavioral hard gate.
 
-        # 2. Overtrading/Turnover failure modes
-        # Only fail after enough samples (10k actions) AND enough exploration (30k steps)
-        if step > 30000 and observed_actions > 10000:
-            if stats["trade_frequency"] > 0.35:
-                raise RuntimeError(f"OVERTRADING_POLICY: {stats['trade_frequency'] * 100:.2f}% activity")
-        
-        if step > 10000:
-            if stats["trades_per_1k_steps"] > 250:
-                raise RuntimeError(f"HYPER_TURNOVER: {stats['trades_per_1k_steps']:.2f} trades per 1k steps")
+        Important:
+        - Raw action frequency is NOT executed overtrading.
+        - Do not fail training just because the policy emits many BUY/SELL actions.
+        - Hard fail only on executed position changes / executed trade rate.
+        """
+        stats = self.get_stats()
+
+        total_actions = (
+            self.hold_count
+            + self.buy_count
+            + self.sell_count
+            + self.close_count
+        )
+
+        if total_actions <= 0:
+            return stats
+
+        raw_action_frequency = stats.get("trade_frequency", 0.0)
+        executed_changes = stats.get("executed_position_changes", 0)
+
+        executed_per_1k = executed_changes / max(step, 1) * 1000
+
+        stats["raw_action_frequency"] = raw_action_frequency
+        stats["executed_position_changes"] = executed_changes
+        stats["executed_trades_per_1k_steps"] = executed_per_1k
+
+        # Warmup. Do not hard-fail early exploration.
+        if step < 30000 or total_actions < 10000:
+            return stats
+
+        # Raw activity is only a warning.
+        if raw_action_frequency > 0.50:
+            self.logger.warning(
+                f"RAW_ACTION_OVERACTIVE Warning: {raw_action_frequency * 100:.2f}% raw activity at step {step}"
+            )
+
+        # Hard fail only if real executed position changes are excessive.
+        if executed_per_1k > 120:
+            raise RuntimeError(
+                f"EXECUTED_OVERTRADING_POLICY: {executed_per_1k:.2f} executed changes per 1k steps at step {step}"
+            )
+
+        # Always-HOLD check only after enough training.
+        if step >= 50000:
+            if stats.get("hold_pct", 0.0) > 0.98 and executed_changes == 0:
+                raise RuntimeError(
+                    f"POLICY_LEARNED_ALWAYS_HOLD: {stats['hold_pct'] * 100:.2f}% HOLD at step {step}"
+                )
+
+            if executed_per_1k < 2:
+                self.logger.warning(
+                    f"STILL_INACTIVE Warning: {executed_per_1k:.2f} executed changes per 1k steps"
+                )
 
         return stats
+

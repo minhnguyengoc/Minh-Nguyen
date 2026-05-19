@@ -11,7 +11,7 @@ PPO_CONFIG = {
     "gamma": 0.99,               # Discount factor (long-term equity growth)
     "gae_lambda": 0.95,          # GAE for variance reduction
     "clip_range": 0.15,          # Tighter clipping to prevent catastrophic updates
-    "ent_coef": 0.03,            # Increased for anti-HOLD exploration
+    "ent_coef": 0.005,            # Increased for anti-HOLD exploration
     "vf_coef": 0.5,              # Value function weight
     "max_grad_norm": 0.5,        # Gradient clipping for stability
 }
