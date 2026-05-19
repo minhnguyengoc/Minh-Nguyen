@@ -66,7 +66,7 @@ def main():
 
     done = False
     steps = 0
-    max_steps = min(5_000, len(df) - 2)
+    max_steps = min(20_000, len(df) - 2)
 
     while not done and steps < max_steps:
         action, _ = model.predict(obs, deterministic=True)
