@@ -56,15 +56,40 @@ class VNStockTradingEnv(gym.Env):
             return np.floor(price / tick) * tick
 
     def _calculate_slippage(self, base_price: float, trade_vol: float, candle_vol: float, side: str) -> float:
-        """Mô phỏng trượt giá dựa trên Volume của nến hiện tại"""
-        if candle_vol <= 0: return base_price
-        
-        # Trượt giá tăng khi khối lượng giao dịch chiếm tỷ trọng lớn trong nến
-        impact = (trade_vol / candle_vol) * self.max_slippage_ratio
-        if side == 'buy':
-            return self._apply_tick_constraints(base_price * (1 + impact), 'buy')
+        """
+        Conservative slippage model.
+
+        Important:
+        The dataset price is already in adjusted units, e.g. 80.0, 90.0, 100.0.
+        Therefore we must NOT apply Vietnamese exchange tick-size rules directly,
+        because those rules assume full VND price units and can distort execution
+        by 5-10% per trade.
+
+        This function caps execution impact at 0.3%.
+        """
+        base_price = float(base_price)
+        trade_vol = float(trade_vol)
+        candle_vol = max(float(candle_vol), 1.0)
+
+        if base_price <= 0:
+            return 0.0
+
+        max_impact_pct = 0.003  # 0.3% max impact
+        participation = trade_vol / candle_vol
+
+        # Linear impact with hard cap.
+        impact = min(participation * 0.01, max_impact_pct)
+
+        if side == "buy":
+            exec_price = base_price * (1.0 + impact)
         else:
-            return self._apply_tick_constraints(base_price * (1 - impact), 'sell')
+            exec_price = base_price * (1.0 - impact)
+
+        # Keep price in same scale as dataset. Do not round to exchange tick buckets here.
+        exec_price = round(exec_price, 4)
+
+        return float(max(exec_price, 0.01))
+
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
