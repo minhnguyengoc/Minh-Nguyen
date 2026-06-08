@@ -25,3 +25,11 @@ agents/saved_models/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Security Credentials/Keys ignore list
+.env
+secrets/
+*.key
+*.pem
+credentials.json
+token.json

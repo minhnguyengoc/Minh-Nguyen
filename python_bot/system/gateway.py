@@ -58,120 +58,29 @@ class PolicyInferenceGateway:
         last_result = None
         for tick in ticks:
             last_result = self._handle_single_tick(tick, portfolio, seq_id)
-
-        if last_result is None:
-            return self._get_safe_fallback(data, portfolio)
-
+            
         return last_result
 
     def _get_safe_fallback(self, data: MarketData, portfolio: PortfolioState) -> Tuple[ActionDirective, StandardizedObservation]:
-        """
-        Contract-safe fallback.
-
-        This function must NEVER crash. It is used when:
-        - sequencer rejects/duplicates an event
-        - out-of-order buffer has not released ticks yet
-        - reset/step needs a safe observation
-        - downstream gateway components are not warmed up
-
-        It must always return:
-        (ActionDirective.HOLD, StandardizedObservation)
-        """
-        import numpy as np
-
-        # 1. Safe raw feature vector.
-        try:
-            raw_vec = self.features.generate()
-            raw_vec = np.asarray(raw_vec, dtype=np.float32).flatten()
-            if raw_vec.size == 0:
-                raise ValueError("empty feature vector")
-        except Exception:
-            n_features = (
-                getattr(self.features, "n_features", None)
-                or getattr(self.features, "feature_dim", None)
-                or getattr(self.normalizer, "n_features", None)
-                or getattr(self.normalizer, "feature_dim", None)
-                or 26
-            )
-            raw_vec = np.zeros(int(n_features), dtype=np.float32)
-
-        # 2. Safe regime fallback. Do not assume MarketRegime.STABLE exists.
-        regime = None
-        try:
-            if hasattr(MarketRegime, "STABLE"):
-                regime = MarketRegime.STABLE
-            elif hasattr(MarketRegime, "NORMAL"):
-                regime = MarketRegime.NORMAL
-            elif hasattr(MarketRegime, "NEUTRAL"):
-                regime = MarketRegime.NEUTRAL
-            else:
-                regime = list(MarketRegime)[0]
-        except Exception:
-            regime = None
-
-        # 3. Safe normalization.
-        try:
-            norm_vec = self.normalizer.normalize(raw_vec, regime)
-            norm_vec = np.asarray(norm_vec, dtype=np.float32).flatten()
-            if norm_vec.size == 0:
-                norm_vec = raw_vec
-        except Exception:
-            norm_vec = raw_vec
-
-        # 4. Safe session state fallback. Do not assume current_state exists.
-        session_state = None
-        try:
-            session_state = getattr(self.session_fsm, "current_state", None)
-
-            if session_state is None:
-                session_state = getattr(self.session_fsm, "state", None)
-
-            if session_state is None:
-                session_state = getattr(self.session_fsm, "session_state", None)
-
-            if session_state is None:
-                session_state = getattr(self.session_fsm, "status", None)
-
-            if session_state is None and hasattr(self.session_fsm, "update"):
-                session_state = self.session_fsm.update(data.timestamp)
-
-        except Exception:
-            session_state = None
-
-        # 5. Safe active-session flag.
-        is_session_active = True
-        try:
-            session_text = str(
-                getattr(session_state, "name", session_state)
-            ).upper()
-
-            if "CLOSED" in session_text or "HALT" in session_text:
-                is_session_active = False
-        except Exception:
-            is_session_active = True
-
-        # 6. Safe latency.
-        try:
-            latency_ms = (data.received_at - data.timestamp).total_seconds() * 1000
-        except Exception:
-            latency_ms = 0.0
-
+        """Returns a safe HOLD action and the last known or zero-filled observation."""
+        # Use existing features if possible, or zero if first tick
+        raw_vec = self.features.generate() if hasattr(self.features, 'generate') else np.zeros(20)
+        regime = MarketRegime.STABLE
+        norm_vec = self.normalizer.normalize(raw_vec, regime)
+        
         meta = ObservationMetadata(
-            is_session_active=is_session_active,
-            session_state=session_state,
+            is_session_active=True,
+            session_state=self.session_fsm.current_state,
             regime=regime,
             is_stale=True,
             kill_switch=False,
             drift_score=0.0,
             confidence_score=0.0,
             policy_abstain=True,
-            latency_ms=latency_ms,
+            latency_ms=0.0,
             event_sequence_id=-1
         )
-
-        obs = StandardizedObservation(vector=norm_vec, metadata=meta)
-        return ActionDirective.HOLD, obs
-
+        return ActionDirective.HOLD, StandardizedObservation(vector=norm_vec, metadata=meta)
 
     def _handle_single_tick(self, data: MarketData, portfolio: PortfolioState, seq_id: int) -> Tuple[ActionDirective, StandardizedObservation]:
         # Update Clock & Session

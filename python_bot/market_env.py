@@ -56,40 +56,15 @@ class VNStockTradingEnv(gym.Env):
             return np.floor(price / tick) * tick
 
     def _calculate_slippage(self, base_price: float, trade_vol: float, candle_vol: float, side: str) -> float:
-        """
-        Conservative slippage model.
-
-        Important:
-        The dataset price is already in adjusted units, e.g. 80.0, 90.0, 100.0.
-        Therefore we must NOT apply Vietnamese exchange tick-size rules directly,
-        because those rules assume full VND price units and can distort execution
-        by 5-10% per trade.
-
-        This function caps execution impact at 0.3%.
-        """
-        base_price = float(base_price)
-        trade_vol = float(trade_vol)
-        candle_vol = max(float(candle_vol), 1.0)
-
-        if base_price <= 0:
-            return 0.0
-
-        max_impact_pct = 0.003  # 0.3% max impact
-        participation = trade_vol / candle_vol
-
-        # Linear impact with hard cap.
-        impact = min(participation * 0.01, max_impact_pct)
-
-        if side == "buy":
-            exec_price = base_price * (1.0 + impact)
+        """Mô phỏng trượt giá dựa trên Volume của nến hiện tại"""
+        if candle_vol <= 0: return base_price
+        
+        # Trượt giá tăng khi khối lượng giao dịch chiếm tỷ trọng lớn trong nến
+        impact = (trade_vol / candle_vol) * self.max_slippage_ratio
+        if side == 'buy':
+            return self._apply_tick_constraints(base_price * (1 + impact), 'buy')
         else:
-            exec_price = base_price * (1.0 - impact)
-
-        # Keep price in same scale as dataset. Do not round to exchange tick buckets here.
-        exec_price = round(exec_price, 4)
-
-        return float(max(exec_price, 0.01))
-
+            return self._apply_tick_constraints(base_price * (1 - impact), 'sell')
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -100,8 +75,6 @@ class VNStockTradingEnv(gym.Env):
         self.equity_history = [self.initial_capital]
         self.max_equity = self.initial_capital
         self.trade_count = 0
-        self.last_trade_step = -10**9
-        self.min_trade_interval = 30
         self.reward_engine = RewardEngine() # Reset engine state
         
         return self._get_obs(), {}
@@ -132,245 +105,107 @@ class VNStockTradingEnv(gym.Env):
         return obs.astype(np.float32)
 
     def step(self, action: int):
-        """
-        Stable long-only execution contract.
-
-        Action mapping:
-        0 = HOLD
-        1 = BUY
-        2 = SELL/CLOSE
-
-        Design:
-        - No early return before done/reward/info are defined.
-        - Cooldown blocks execution but still advances env by one step.
-        - Reward is always finite and clipped for PPO stability.
-        """
-        action = int(action)
-
-        # Safe defaults
-        reward = 0.0
-        components = {}
-        transaction_cost = 0.0
-        rejected_reason = None
-        executed_qty = 0.0
-        executed_price = None
-        position_changed = False
-
         current_data = self.df.iloc[self.current_step]
-        price = float(current_data["close"])
-        volume = float(current_data["volume"]) if "volume" in current_data else 0.0
+        price = current_data['close']
+        volume = current_data['volume']
+        
+        transaction_cost = 0.0
+        
+        # 1. Action Execution
+        executed_qty = None
+        executed_price = None
+        
+        if action == 1: # BUY
+            fee_rate = 0.0015
+            max_buy_val = self.cash / (1 + fee_rate)
+            shares_to_buy = (max_buy_val // (price * 100)) * 100
+            
+            if shares_to_buy > 0:
+                exec_price = self._calculate_slippage(price, shares_to_buy, volume, 'buy')
+                cost = shares_to_buy * exec_price
+                fee = cost * fee_rate
+                if self.cash >= (cost + fee):
+                    self.cash -= (cost + fee)
+                    self.t_plus_queue[0] += shares_to_buy
+                    self.trade_count += 1
+                    transaction_cost = fee
+                    executed_qty = float(shares_to_buy)
+                    executed_price = float(exec_price)
+                    
+        elif action == 2: # SELL 100% Available
+            if self.available_shares > 0:
+                shares_to_sell = self.available_shares
+                exec_price = self._calculate_slippage(price, shares_to_sell, volume, 'sell')
+                proceeds = shares_to_sell * exec_price
+                fee = proceeds * 0.0015
+                tax = proceeds * 0.001
+                self.cash += (proceeds - fee - tax)
+                self.available_shares = 0
+                self.trade_count += 1
+                transaction_cost = fee + tax
+                executed_qty = float(shares_to_sell)
+                executed_price = float(exec_price)
 
-        fee_rate = 0.0015
-        tax_rate = 0.001
-        lot_size = 100
-
-        # Ensure cooldown state exists
-        if not hasattr(self, "last_trade_step"):
-            self.last_trade_step = -10**9
-        if not hasattr(self, "min_trade_interval"):
-            self.min_trade_interval = 30
-
-        position_before = float(self.available_shares + sum(self.t_plus_queue))
-        cash_before = float(self.cash)
-        equity_before = float(self.cash + position_before * price)
-
-        # --------------------------------------------------
-        # 1. COOLDOWN CHECK
-        # --------------------------------------------------
-        cooldown_active = False
-        if action in (1, 2):
-            if (self.current_step - int(self.last_trade_step)) < int(self.min_trade_interval):
-                cooldown_active = True
-                rejected_reason = "TRADE_COOLDOWN"
-
-        # --------------------------------------------------
-        # 2. EXECUTION
-        # --------------------------------------------------
-        if not cooldown_active:
-            if action == 1:  # BUY
-                if price <= 0:
-                    rejected_reason = "INVALID_PRICE"
-                elif self.cash <= 0:
-                    rejected_reason = "INSUFFICIENT_CASH"
-                elif volume <= 0:
-                    rejected_reason = "NO_VOLUME"
-                else:
-                    max_position_pct = 0.10
-                    participation_limit = 0.05
-
-                    budget = min(self.cash * 0.95, equity_before * max_position_pct)
-
-                    budget_shares = int((budget / (price * (1.0 + fee_rate))) // lot_size * lot_size)
-                    volume_shares = int((volume * participation_limit) // lot_size * lot_size)
-                    shares_to_buy = min(budget_shares, volume_shares)
-
-                    if budget_shares <= 0:
-                        rejected_reason = "ORDER_BELOW_LOT_SIZE_BY_BUDGET"
-                    elif volume_shares <= 0:
-                        rejected_reason = "ORDER_TOO_SMALL_BY_LIQUIDITY"
-                    elif shares_to_buy <= 0:
-                        rejected_reason = "ORDER_BELOW_LOT_SIZE"
-                    else:
-                        exec_price = self._calculate_slippage(price, shares_to_buy, volume, "buy")
-
-                        if exec_price <= 0:
-                            rejected_reason = "INVALID_EXEC_PRICE"
-                        else:
-                            cost = shares_to_buy * exec_price
-                            fee = cost * fee_rate
-                            total_cost = cost + fee
-
-                            if self.cash >= total_cost:
-                                self.cash -= total_cost
-                                self.t_plus_queue[0] += shares_to_buy
-
-                                self.trade_count += 1
-                                self.last_trade_step = self.current_step
-
-                                transaction_cost = fee
-                                executed_qty = float(shares_to_buy)
-                                executed_price = float(exec_price)
-                                rejected_reason = None
-                            else:
-                                rejected_reason = "INSUFFICIENT_CASH_AFTER_SLIPPAGE"
-
-            elif action == 2:  # SELL/CLOSE
-                total_pos_before_sell = float(self.available_shares + sum(self.t_plus_queue))
-
-                if total_pos_before_sell <= 0:
-                    rejected_reason = "NO_POSITION_TO_SELL"
-                elif price <= 0:
-                    rejected_reason = "INVALID_PRICE"
-                else:
-                    shares_to_sell = total_pos_before_sell
-                    exec_price = self._calculate_slippage(price, shares_to_sell, volume, "sell")
-
-                    if exec_price <= 0:
-                        rejected_reason = "INVALID_EXEC_PRICE"
-                    else:
-                        proceeds = shares_to_sell * exec_price
-                        fee = proceeds * fee_rate
-                        tax = proceeds * tax_rate
-
-                        self.cash += proceeds - fee - tax
-
-                        self.available_shares = 0.0
-                        self.t_plus_queue[0] = 0.0
-                        self.t_plus_queue[1] = 0.0
-
-                        self.trade_count += 1
-                        self.last_trade_step = self.current_step
-
-                        transaction_cost = fee + tax
-                        executed_qty = float(shares_to_sell)
-                        executed_price = float(exec_price)
-                        rejected_reason = None
-
-            elif action == 0:
-                rejected_reason = None
-            else:
-                rejected_reason = f"INVALID_ACTION_{action}"
-
-        # --------------------------------------------------
-        # 3. FORWARD RETURNS FOR REWARD ENGINE
-        # --------------------------------------------------
+        # 2. Forward Return Calculation (For Reward Engine only)
         forward_rets = {}
         for window in [5, 10]:
             target_idx = min(self.current_step + window, len(self.df) - 1)
-            future_price = float(self.df.iloc[target_idx]["close"])
+            future_price = self.df.iloc[target_idx]['close']
             forward_rets[window] = (future_price - price) / (price + 1e-9)
 
-        # --------------------------------------------------
-        # 4. T+2 INVENTORY CYCLE
-        # --------------------------------------------------
+        # 3. Step Inventory (T+2 cycle)
         self.available_shares += self.t_plus_queue[1]
         self.t_plus_queue[1] = self.t_plus_queue[0]
         self.t_plus_queue[0] = 0.0
-
-        # --------------------------------------------------
-        # 5. ADVANCE STEP
-        # --------------------------------------------------
+        
         self.current_step += 1
         done = self.current_step >= len(self.df) - 1
-
-        val_price = float(self.df.iloc[self.current_step]["close"]) if not done else price
-        total_pos = float(self.available_shares + sum(self.t_plus_queue))
-        current_equity = float(self.cash + total_pos * val_price)
-
+        
+        # 4. Reward Calculation
+        val_price = self.df.iloc[self.current_step]['close'] if not done else price
+        total_pos = self.available_shares + sum(self.t_plus_queue)
+        current_equity = self.cash + (total_pos * val_price)
         self.max_equity = max(self.max_equity, current_equity)
         drawdown = (self.max_equity - current_equity) / (self.max_equity + 1e-9)
-
-        # --------------------------------------------------
-        # 6. REWARD
-        # --------------------------------------------------
-        if current_equity <= 0:
-            reward = -1.0
-            components = {"terminal_penalty": -1.0}
-            done = True
-            rejected_reason = rejected_reason or "NEGATIVE_EQUITY"
-        else:
-            reward, components = self.reward_engine.compute_reward(
-                equity=current_equity,
-                initial_capital=self.initial_capital,
-                drawdown=drawdown,
-                action=action,
-                position=total_pos,
-                forward_returns=forward_rets,
-                transaction_cost=transaction_cost,
-                terminated=done
-            )
-
-        # Penalty for invalid / non-executed active actions
-        extra_penalty = 0.0
-        if rejected_reason == "NO_POSITION_TO_SELL":
-            extra_penalty -= 0.05
-        elif rejected_reason == "TRADE_COOLDOWN":
-            extra_penalty -= 0.03
-        elif rejected_reason in ("ORDER_TOO_SMALL_BY_LIQUIDITY", "INVALID_EXEC_PRICE"):
-            extra_penalty -= 0.02
-        elif action in (1, 2) and executed_qty <= 0:
-            extra_penalty -= 0.02
-
-        reward = float(reward) + extra_penalty
-
-        reward = float(np.nan_to_num(reward, nan=-1.0, posinf=1.0, neginf=-1.0))
-        reward = float(np.clip(reward, -1.0, 1.0))
-
-        if not isinstance(components, dict):
-            components = {}
-        components["extra_execution_penalty"] = extra_penalty
-        components["final_reward_clipped"] = reward
-
+        
+        # Track position before/after
+        pos_before = previous_total_pos if 'previous_total_pos' in locals() else total_pos # This is tricky in this structure
+        # Let's just use the ones I calculated
+        
+        reward, components = self.reward_engine.compute_reward(
+            equity=current_equity,
+            initial_capital=self.initial_capital,
+            drawdown=drawdown,
+            action=action,
+            position=total_pos,
+            forward_returns=forward_rets,
+            transaction_cost=transaction_cost,
+            terminated=done
+        )
+        
         self.equity_history.append(current_equity)
-
-        position_after = total_pos
-        position_changed = bool(position_after != position_before)
-
+        
+        # 5. Info Pack
         info = {
             "equity": current_equity,
-            "cash": float(self.cash),
-            "cash_before": cash_before,
-
-            "position": position_after,
-            "shares": position_after,
-            "available_shares": float(self.available_shares),
-            "pending_t1_shares": float(self.t_plus_queue[1]),
-            "pending_t0_shares": float(self.t_plus_queue[0]),
-
+            "shares": total_pos,
+            "cash": self.cash,
+            "reward_components": components,
+            
+            # Stage 4.1 Diagnostics
             "raw_action": action,
             "interpreted_action": action,
-            "position_before": position_before,
-            "position_after": position_after,
-            "position_changed": position_changed,
-            "total_trades": int(self.trade_count),
-            "executed_qty": float(executed_qty),
+            "position_before": getattr(self, '_prev_total_pos', total_pos),
+            "position_after": total_pos,
+            "position_changed": getattr(self, '_prev_total_pos', total_pos) != total_pos,
+            "total_trades": self.trade_count,
+            "rejected_reason": "INSUFFICIENT_FUNDS_OR_SHARES" if (action > 0 and getattr(self, '_prev_total_pos', total_pos) == total_pos) else None,
             "executed_price": executed_price,
-            "transaction_cost": float(transaction_cost),
-            "rejected_reason": rejected_reason,
-            "reward_components": components,
+            "executed_qty": executed_qty
         }
-
-        return self._get_obs(), reward, done, False, info
+        self._prev_total_pos = total_pos
+        
+        return self._get_obs(), float(reward), done, False, info
 
 
     def render(self, mode="human"):
